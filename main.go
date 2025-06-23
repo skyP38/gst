@@ -4,6 +4,9 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/go-gst/go-gst/gst"
 )
@@ -96,21 +99,76 @@ func main() {
 
 	pipeline.SetState(gst.StatePlaying)
 
-	bus := pipeline.GetPipelineBus()
-	for {
-		msg := bus.TimedPop(gst.ClockTimeNone)
-		if msg == nil {
-			continue
-		}
+	pauseChan := make(chan struct{}, 1)
+	quitChan := make(chan os.Signal, 1)
+	signal.Notify(quitChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
 
+	go func() {
+		fd := int(os.Stdin.Fd())
+		termios := enableRawMode(fd)
+		defer restoreMode(fd, termios)
+
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+				continue
+			}
+
+			switch buf[0] {
+			case ' ':
+				select {
+				case pauseChan <- struct{}{}:
+				default:
+				}
+			case 3: // Ctrl+C
+				quitChan <- syscall.SIGINT
+			}
+		}
+	}()
+
+	bus := pipeline.GetPipelineBus()
+
+	for {
+		select {
+		case <-pauseChan:
+			handlePause(pipeline)
+		case <-quitChan:
+			pipeline.SetState(gst.StateNull)
+			log.Println("end")
+			return
+		default:
+			handleMessages(bus, pipeline)
+		}
+	}
+}
+
+func handlePause(pipeline *gst.Pipeline) {
+	_, state := pipeline.GetState(gst.StatePlaying, gst.ClockTimeNone)
+	if state == gst.StatePlaying {
+		pipeline.SetState(gst.StatePaused)
+		log.Println("PAUSE (enter shift to continue)")
+	} else {
+		pipeline.SetState(gst.StatePlaying)
+		log.Println("PLAY (enter shift to pause)")
+	}
+}
+
+func handleMessages(bus *gst.Bus, pipeline *gst.Pipeline) {
+	for {
+		msg := bus.Pop()
+		if msg == nil {
+			break
+		}
 		switch msg.Type() {
 		case gst.MessageEOS:
 			pipeline.SetState(gst.StateNull)
-			return
+			os.Exit(0)
 		case gst.MessageError:
 			err := msg.ParseError()
+			log.Println("error", err)
 			pipeline.SetState(gst.StateNull)
-			log.Fatal("pipeline error:", err.Error())
+			os.Exit(1)
 		}
 	}
 }
