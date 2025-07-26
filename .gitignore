@@ -3,3 +3,5 @@
 *.mp4
 *.mod
 *.sum
+rtsp_server
+*.mkv
